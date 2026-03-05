@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  data-science-app:
+    build: .
+    container_name: ecommerce-churn-prediction
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+    working_dir: /app
