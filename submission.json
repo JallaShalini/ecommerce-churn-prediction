@@ -1,0 +1,57 @@
+{
+  "student_info": {
+    "name": "Jalla Shalini",
+    "program": "B.Tech AIML",
+    "year": "3rd Year",
+    "role": "Machine Learning Developer"
+  },
+
+  "repository": {
+    "github_repo": "https://github.com/JallaShalini/ecommerce-churn-prediction"
+  },
+
+  "deployment": {
+    "platform": "Streamlit Cloud",
+    "app_url": "https://ecommerce-churn-prediction-htezfjcg74hsh5qdw64s9n.streamlit.app"
+  },
+
+  "dataset": {
+    "name": "E-commerce Customer Transactions Dataset",
+    "description": "Dataset containing purchase frequency, monetary value, customer segment, and behavioral metrics used for churn prediction"
+  },
+
+  "models": {
+    "final_model": "XGBoost",
+    "other_models_tested": [
+      "Logistic Regression",
+      "Decision Tree",
+      "Random Forest",
+      "Neural Network"
+    ]
+  },
+
+  "completion_status": {
+    "data_cleaning": true,
+    "eda": true,
+    "feature_engineering": true,
+    "model_training": true,
+    "model_evaluation": true,
+    "streamlit_app": true,
+    "documentation": true
+  },
+
+  "key_learnings": [
+    "Understanding customer churn prediction",
+    "Feature engineering for behavioral data",
+    "Model evaluation and selection",
+    "Deploying machine learning applications using Streamlit",
+    "Version control using Git and GitHub"
+  ],
+
+  "challenges_faced": [
+    "Handling dependency conflicts during deployment",
+    "Fixing merge conflicts in Git",
+    "Ensuring correct model serialization and loading",
+    "Managing package compatibility in Streamlit Cloud"
+  ]
+}
