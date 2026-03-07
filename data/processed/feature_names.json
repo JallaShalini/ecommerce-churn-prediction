@@ -1,0 +1,14 @@
+[
+    "BasketSize",
+    "PreferredDay",
+    "PreferredHour",
+    "CountryDiversity",
+    "ProductDiversityScore",
+    "AvgPricePreference",
+    "StdPricePreference",
+    "R_Score",
+    "F_Score",
+    "M_Score",
+    "RFM_Score",
+    "CustomerSegment"
+]
