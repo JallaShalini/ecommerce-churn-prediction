@@ -4,3 +4,4 @@ Data exploration completed
 Data cleaning pipeline implemented
 Missing value handling
 Feature engineering implemented
+Feature scaling applied
