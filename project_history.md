@@ -7,3 +7,4 @@ Feature engineering implemented
 Feature scaling applied
 EDA insights documented
 Baseline model training
+Logistic regression model added
