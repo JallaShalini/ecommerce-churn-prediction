@@ -11,3 +11,4 @@ Logistic regression model added
 Random forest model added
 XGBoost model added
 Model evaluation completed
+Hyperparameter tuning completed
