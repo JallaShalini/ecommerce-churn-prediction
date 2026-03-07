@@ -9,3 +9,4 @@ EDA insights documented
 Baseline model training
 Logistic regression model added
 Random forest model added
+XGBoost model added
