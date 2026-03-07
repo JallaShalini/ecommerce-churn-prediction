@@ -5,3 +5,4 @@ Data cleaning pipeline implemented
 Missing value handling
 Feature engineering implemented
 Feature scaling applied
+EDA insights documented
