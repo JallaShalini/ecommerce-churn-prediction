@@ -17,17 +17,31 @@
 
   "dataset": {
     "name": "E-commerce Customer Transactions Dataset",
-    "description": "Dataset containing purchase frequency, monetary value, customer segment, and behavioral metrics used for churn prediction"
+    "description": "Online retail transactional dataset aggregated to customer-level behavioral features (RFM, temporal activity, segments) for 90-day churn prediction"
   },
 
   "models": {
-    "final_model": "XGBoost",
+    "final_model": "Logistic Regression",
     "other_models_tested": [
       "Logistic Regression",
       "Decision Tree",
       "Random Forest",
       "Neural Network"
     ]
+  },
+
+  "metrics": {
+    "test_confusion_matrix": {
+      "tn": 200,
+      "fp": 78,
+      "fn": 71,
+      "tp": 138
+    },
+    "test_accuracy": 0.6940,
+    "test_precision": 0.6389,
+    "test_recall": 0.6603,
+    "test_f1": 0.6494,
+    "test_roc_auc": 0.7667
   },
 
   "completion_status": {

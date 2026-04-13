@@ -1,189 +1,436 @@
 import pandas as pd
 import numpy as np
 import json
-from datetime import datetime
+from datetime import timedelta
 
-INPUT_FILE = "data/processed/cleaned_transactions.csv"
-OUTPUT_FILE = "data/processed/customer_features.csv"
-INFO_FILE = "data/processed/feature_info.json"
 
-print("Loading cleaned dataset...")
+class FeatureEngineer:
+    """Customer-level feature engineering with proper temporal churn definition.
 
-df = pd.read_csv(INPUT_FILE)
+    This class:
+    - Splits cleaned transactions into training and observation periods
+    - Defines churn based on future inactivity (no purchases in observation window)
+    - Builds RFM, behavioral, temporal, and product features
+    - Saves customer_features.csv and feature_info.json
+    """
 
-df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"])
+    def __init__(self, transactions_path="data/processed/cleaned_transactions.csv", training_window_days=90):
+        self.transactions_path = transactions_path
+        self.training_window_days = training_window_days
 
-print("Dataset loaded.")
+        self.transactions = pd.read_csv(self.transactions_path, parse_dates=["InvoiceDate"])
 
-# -----------------------------
-# RFM Features
-# -----------------------------
+        # Use canonical column names from UCI dataset
+        # Ensure CustomerID is present and numeric
+        if "CustomerID" not in self.transactions.columns:
+            raise ValueError("Expected 'CustomerID' column in cleaned transactions.")
 
-snapshot_date = df["InvoiceDate"].max() + pd.Timedelta(days=1)
+        self.max_date = self.transactions["InvoiceDate"].max()
+        self.training_cutoff = self.max_date - timedelta(days=self.training_window_days)
+        self.observation_end = self.max_date
 
-rfm = df.groupby("Customer ID").agg({
-    "InvoiceDate": lambda x: (snapshot_date - x.max()).days,
-    "Invoice": "nunique",
-    "TotalPrice": "sum"
-})
+        self.training_data = None
+        self.observation_data = None
+        self.customer_features = None
 
-rfm.columns = ["Recency", "Frequency", "Monetary"]
+        print(f"Loaded {len(self.transactions)} transactions")
+        print(f"Data range: {self.transactions['InvoiceDate'].min()} to {self.max_date}")
+        print(f"Training cutoff: {self.training_cutoff}")
+        print(f"Observation end: {self.observation_end}")
 
-# -----------------------------
-# Avg Order Value
-# -----------------------------
+    # ------------------------------------------------------------------
+    # Temporal split & churn
+    # ------------------------------------------------------------------
+    def split_data_by_time(self):
+        """Split transactions into training and observation periods."""
+        self.training_data = self.transactions[self.transactions["InvoiceDate"] <= self.training_cutoff].copy()
+        self.observation_data = self.transactions[
+            (self.transactions["InvoiceDate"] > self.training_cutoff)
+            & (self.transactions["InvoiceDate"] <= self.observation_end)
+        ].copy()
 
-avg_order_value = df.groupby("Customer ID")["TotalPrice"].mean()
+        print(f"Training transactions: {len(self.training_data)}")
+        print(f"Observation transactions: {len(self.observation_data)}")
+        return self
 
-# -----------------------------
-# Unique Products
-# -----------------------------
+    def create_target_variable(self):
+        """Create churn label: 1 = churned, 0 = active.
 
-unique_products = df.groupby("Customer ID")["StockCode"].nunique()
+        A customer is churned if they purchased in the training period
+        but made no purchases in the observation period.
+        """
 
-# -----------------------------
-# Total Items Purchased
-# -----------------------------
+        training_customers = set(self.training_data["CustomerID"].unique())
+        observation_customers = set(self.observation_data["CustomerID"].unique())
 
-total_items = df.groupby("Customer ID")["Quantity"].sum()
+        self.customer_features = pd.DataFrame({"CustomerID": list(training_customers)})
 
-# -----------------------------
-# Avg Days Between Purchases
-# -----------------------------
+        self.customer_features["Churn"] = self.customer_features["CustomerID"].apply(
+            lambda cid: 1 if cid not in observation_customers else 0
+        )
 
-purchase_dates = df.groupby("Customer ID")["InvoiceDate"].apply(lambda x: x.sort_values().diff().dt.days.mean())
+        churn_rate = self.customer_features["Churn"].mean() * 100
+        print(f"Churn rate: {churn_rate:.2f}%")
+        if churn_rate < 20 or churn_rate > 40:
+            print("WARNING: Churn rate is outside the typical 20–40% band. "
+                  "Verify the temporal split and cleaning steps.")
+        return self
 
-# -----------------------------
-# Basket Size
-# -----------------------------
+    # ------------------------------------------------------------------
+    # RFM and related features
+    # ------------------------------------------------------------------
+    def create_rfm_features(self):
+        """Create classic RFM features using training period only."""
+        df = self.training_data.copy()
 
-basket_size = df.groupby(["Customer ID", "Invoice"])["Quantity"].sum().groupby("Customer ID").mean()
+        # Raw cleaned data uses 'Invoice' as invoice identifier
+        rfm = df.groupby("CustomerID").agg(
+            {
+                "InvoiceDate": lambda x: (self.training_cutoff - x.max()).days,
+                "Invoice": "nunique",
+                "TotalPrice": ["sum", "mean"],
+                "StockCode": "nunique",
+                "Quantity": "sum",
+            }
+        ).reset_index()
 
-# -----------------------------
-# Preferred Day
-# -----------------------------
+        rfm.columns = [
+            "CustomerID",
+            "Recency",
+            "Frequency",
+            "TotalSpent",
+            "AvgOrderValue",
+            "UniqueProducts",
+            "TotalItems",
+        ]
 
-df["DayOfWeek"] = df["InvoiceDate"].dt.day_name()
+        self.customer_features = self.customer_features.merge(rfm, on="CustomerID", how="left")
 
-preferred_day = df.groupby("Customer ID")["DayOfWeek"].agg(lambda x: x.value_counts().index[0])
+        print("RFM features created.")
+        return self
 
-# -----------------------------
-# Preferred Hour
-# -----------------------------
+    def create_behavioral_features(self):
+        """Create behavioral features: intervals, basket stats, preferences."""
+        df = self.training_data.copy()
 
-df["Hour"] = df["InvoiceDate"].dt.hour
+        # Average days between purchases
+        intervals = (
+            df.sort_values(["CustomerID", "InvoiceDate"])
+            .groupby("CustomerID")["InvoiceDate"]
+            .apply(lambda x: x.diff().dt.days.mean())
+            .reset_index(name="AvgDaysBetweenPurchases")
+        )
 
-preferred_hour = df.groupby("Customer ID")["Hour"].agg(lambda x: x.value_counts().index[0])
+        # Basket size stats per invoice
+        basket = (
+            df.groupby(["CustomerID", "Invoice"])["Quantity"]
+            .sum()
+            .groupby("CustomerID")
+            .agg(["mean", "std", "max"])
+            .reset_index()
+        )
+        basket.columns = ["CustomerID", "AvgBasketSize", "StdBasketSize", "MaxBasketSize"]
 
-# -----------------------------
-# Country Diversity
-# -----------------------------
+        # Preferred day (0-6) and hour (0-23)
+        df["DayOfWeek"] = df["InvoiceDate"].dt.dayofweek
+        df["Hour"] = df["InvoiceDate"].dt.hour
 
-country_diversity = df.groupby("Customer ID")["Country"].nunique()
+        prefs = (
+            df.groupby("CustomerID")[["DayOfWeek", "Hour"]]
+            .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0])
+            .reset_index()
+        )
+        prefs.columns = ["CustomerID", "PreferredDay", "PreferredHour"]
 
-# -----------------------------
-# Customer Lifetime
-# -----------------------------
+        # Country diversity
+        country_div = (
+            df.groupby("CustomerID")["Country"].nunique().reset_index(name="CountryDiversity")
+        )
 
-customer_lifetime = df.groupby("Customer ID")["InvoiceDate"].agg(lambda x: (x.max() - x.min()).days)
+        self.customer_features = (
+            self.customer_features.merge(intervals, on="CustomerID", how="left")
+            .merge(basket, on="CustomerID", how="left")
+            .merge(prefs, on="CustomerID", how="left")
+            .merge(country_div, on="CustomerID", how="left")
+        )
 
-# -----------------------------
-# Purchase Velocity
-# -----------------------------
+        print("Behavioral features created.")
+        return self
 
-purchase_velocity = rfm["Frequency"] / (customer_lifetime + 1)
+    def create_temporal_features(self):
+        """Create temporal features: lifetime, velocity, recent activity windows."""
+        df = self.training_data.copy()
 
-# -----------------------------
-# Purchases last 30/60/90 days
-# -----------------------------
+        lifetime = (
+            df.groupby("CustomerID")["InvoiceDate"]
+            .agg(["min", "max"])
+            .reset_index()
+            .rename(columns={"min": "FirstPurchaseDate", "max": "LastPurchaseDate"})
+        )
+        lifetime["CustomerLifetimeDays"] = (
+            lifetime["LastPurchaseDate"] - lifetime["FirstPurchaseDate"]
+        ).dt.days
 
-last_date = df["InvoiceDate"].max()
+        # Purchase velocity = frequency / lifetime
+        freq = self.customer_features.set_index("CustomerID")["Frequency"]
+        lifetime["PurchaseVelocity"] = (
+            freq.reindex(lifetime["CustomerID"]).values
+            / (lifetime["CustomerLifetimeDays"] + 1)
+        )
 
-p30 = df[df["InvoiceDate"] >= last_date - pd.Timedelta(days=30)].groupby("Customer ID")["Invoice"].nunique()
-p60 = df[df["InvoiceDate"] >= last_date - pd.Timedelta(days=60)].groupby("Customer ID")["Invoice"].nunique()
-p90 = df[df["InvoiceDate"] >= last_date - pd.Timedelta(days=90)].groupby("Customer ID")["Invoice"].nunique()
+        # Recent activity windows (30/60/90 days before training cutoff)
+        cutoff_30 = self.training_cutoff - timedelta(days=30)
+        cutoff_60 = self.training_cutoff - timedelta(days=60)
+        cutoff_90 = self.training_cutoff - timedelta(days=90)
 
-# -----------------------------
-# Product Diversity
-# -----------------------------
+        recent_30 = (
+            df[df["InvoiceDate"] > cutoff_30]
+            .groupby("CustomerID")["Invoice"]
+            .nunique()
+            .reset_index(name="Purchases_Last30Days")
+        )
+        recent_60 = (
+            df[df["InvoiceDate"] > cutoff_60]
+            .groupby("CustomerID")["Invoice"]
+            .nunique()
+            .reset_index(name="Purchases_Last60Days")
+        )
+        recent_90 = (
+            df[df["InvoiceDate"] > cutoff_90]
+            .groupby("CustomerID")["Invoice"]
+            .nunique()
+            .reset_index(name="Purchases_Last90Days")
+        )
 
-product_diversity = unique_products
+        self.customer_features = (
+            self.customer_features.merge(
+                lifetime[["CustomerID", "CustomerLifetimeDays", "PurchaseVelocity"]],
+                on="CustomerID",
+                how="left",
+            )
+            .merge(recent_30, on="CustomerID", how="left")
+            .merge(recent_60, on="CustomerID", how="left")
+            .merge(recent_90, on="CustomerID", how="left")
+        )
 
-# -----------------------------
-# Price Preferences
-# -----------------------------
+        for col in ["Purchases_Last30Days", "Purchases_Last60Days", "Purchases_Last90Days"]:
+            self.customer_features[col] = self.customer_features[col].fillna(0)
 
-avg_price = df.groupby("Customer ID")["Price"].mean()
-std_price = df.groupby("Customer ID")["Price"].std()
+        print("Temporal features created.")
+        return self
 
-# -----------------------------
-# Combine All Features
-# -----------------------------
+    def create_product_features(self):
+        """Create product affinity and price preference features."""
+        df = self.training_data.copy()
 
-features = pd.DataFrame(index=rfm.index)
+        # Diversity ratio: unique products / total rows
+        prod_div = (
+            df.groupby("CustomerID")["StockCode"]
+            .agg(lambda x: len(set(x)) / len(x))
+            .reset_index(name="ProductDiversityScore")
+        )
 
-features["Recency"] = rfm["Recency"]
-features["Frequency"] = rfm["Frequency"]
-features["Monetary"] = rfm["Monetary"]
-features["AvgOrderValue"] = avg_order_value
-features["UniqueProducts"] = unique_products
-features["TotalItems"] = total_items
-features["AvgDaysBetweenPurchases"] = purchase_dates
-features["BasketSize"] = basket_size
-features["PreferredDay"] = preferred_day
-features["PreferredHour"] = preferred_hour
-features["CountryDiversity"] = country_diversity
-features["CustomerLifetimeDays"] = customer_lifetime
-features["PurchaseVelocity"] = purchase_velocity
-features["Purchases_Last30Days"] = p30
-features["Purchases_Last60Days"] = p60
-features["Purchases_Last90Days"] = p90
-features["ProductDiversityScore"] = product_diversity
-features["AvgPricePreference"] = avg_price
-features["StdPricePreference"] = std_price
+        price_col = "UnitPrice" if "UnitPrice" in df.columns else "Price"
+        price_pref = (
+            df.groupby("CustomerID")[price_col]
+            .agg(["mean", "std", "min", "max"])
+            .reset_index()
+        )
+        price_pref.columns = [
+            "CustomerID",
+            "AvgPricePreference",
+            "StdPricePreference",
+            "MinPrice",
+            "MaxPrice",
+        ]
 
-features = features.fillna(0)
+        qty_pref = (
+            df.groupby(["CustomerID", "Invoice"])["Quantity"]
+            .sum()
+            .groupby("CustomerID")
+            .mean()
+            .reset_index(name="AvgQuantityPerOrder")
+        )
 
-# -----------------------------
-# RFM Scoring
-# -----------------------------
+        self.customer_features = (
+            self.customer_features.merge(prod_div, on="CustomerID", how="left")
+            .merge(price_pref, on="CustomerID", how="left")
+            .merge(qty_pref, on="CustomerID", how="left")
+        )
 
-features["R_Score"] = pd.qcut(features["Recency"], 4, labels=[4,3,2,1])
-features["F_Score"] = pd.qcut(features["Frequency"].rank(method="first"), 4, labels=[1,2,3,4])
-features["M_Score"] = pd.qcut(features["Monetary"], 4, labels=[1,2,3,4])
+        print("Product features created.")
+        return self
 
-features["RFM_Score"] = features["R_Score"].astype(str) + features["F_Score"].astype(str) + features["M_Score"].astype(str)
+    def create_customer_value_segment(self):
+        """Create RFM scores and customer segments."""
+        cf = self.customer_features
 
-# -----------------------------
-# Customer Segmentation
-# -----------------------------
+        cf["RecencyScore"] = pd.qcut(
+            cf["Recency"], q=4, labels=[4, 3, 2, 1], duplicates="drop"
+        ).astype(int)
+        # For Frequency/Monetary we may have low cardinality; use rank to avoid
+        # duplicate bin edges in qcut.
+        cf["FrequencyScore"] = pd.qcut(
+            cf["Frequency"].rank(method="first"),
+            q=4,
+            labels=[1, 2, 3, 4],
+            duplicates="drop",
+        ).astype(int)
 
-features["CustomerSegment"] = "Regular"
+        cf["MonetaryScore"] = pd.qcut(
+            cf["TotalSpent"].rank(method="first"),
+            q=4,
+            labels=[1, 2, 3, 4],
+            duplicates="drop",
+        ).astype(int)
 
-features.loc[(features["R_Score"] == 4) & (features["F_Score"] == 4), "CustomerSegment"] = "Champions"
-features.loc[(features["R_Score"] == 3) & (features["F_Score"] >= 3), "CustomerSegment"] = "Loyal"
-features.loc[(features["R_Score"] <= 2) & (features["F_Score"] <= 2), "CustomerSegment"] = "At Risk"
+        cf["RFM_Score"] = (
+            cf["RecencyScore"] + cf["FrequencyScore"] + cf["MonetaryScore"]
+        )
 
-# -----------------------------
-# Save Features
-# -----------------------------
+        def segment(row):
+            if row["RFM_Score"] >= 10:
+                return "Champions"
+            if row["RFM_Score"] >= 8:
+                return "Loyal"
+            if row["RFM_Score"] >= 6:
+                return "Potential"
+            if row["RFM_Score"] >= 4:
+                return "At Risk"
+            return "Lost"
 
-features.to_csv(OUTPUT_FILE)
+        cf["CustomerSegment"] = cf.apply(segment, axis=1)
 
-print("Customer features saved.")
+        self.customer_features = cf
+        print("Customer segments created.")
+        return self
 
-# -----------------------------
-# Feature Info JSON
-# -----------------------------
+    def handle_missing_values(self):
+        """Fill remaining missing values: numeric → median, categorical → mode."""
+        cf = self.customer_features
+        numeric_cols = [
+            c for c in cf.select_dtypes(include=[np.number]).columns
+            if c not in ["CustomerID", "Churn"]
+        ]
+        for col in numeric_cols:
+            cf[col] = cf[col].fillna(cf[col].median())
 
-info = {
-    "customers": int(len(features)),
-    "features": int(features.shape[1]),
-    "generated_at": str(datetime.now())
-}
+        cat_cols = [
+            c for c in cf.select_dtypes(exclude=[np.number]).columns
+            if c not in ["CustomerID", "Churn"]
+        ]
+        for col in cat_cols:
+            if not cf[col].mode().empty:
+                cf[col] = cf[col].fillna(cf[col].mode().iloc[0])
 
-with open(INFO_FILE, "w") as f:
-    json.dump(info, f, indent=4)
+        self.customer_features = cf
+        print("Missing values handled.")
+        return self
 
-print("Feature info saved.")
-print("Feature engineering completed.")
+    def save_features(self, output_path="data/processed/customer_features.csv"):
+        """Save customer_features.csv and feature_info.json with required schema."""
+        self.customer_features.to_csv(output_path, index=False)
+        print(f"Customer features saved to {output_path}.")
+
+        churn_rate = float(self.customer_features["Churn"].mean())
+        churned = int(self.customer_features["Churn"].sum())
+        total_customers = int(len(self.customer_features))
+
+        feature_categories = {
+            "rfm": [
+                "Recency",
+                "Frequency",
+                "TotalSpent",
+                "AvgOrderValue",
+                "UniqueProducts",
+                "TotalItems",
+            ],
+            "behavioral": [
+                "AvgDaysBetweenPurchases",
+                "AvgBasketSize",
+                "StdBasketSize",
+                "MaxBasketSize",
+                "PreferredDay",
+                "PreferredHour",
+                "CountryDiversity",
+            ],
+            "temporal": [
+                "CustomerLifetimeDays",
+                "PurchaseVelocity",
+                "Purchases_Last30Days",
+                "Purchases_Last60Days",
+                "Purchases_Last90Days",
+            ],
+            "product": [
+                "ProductDiversityScore",
+                "AvgPricePreference",
+                "StdPricePreference",
+                "MinPrice",
+                "MaxPrice",
+                "AvgQuantityPerOrder",
+            ],
+            "derived": [
+                "RecencyScore",
+                "FrequencyScore",
+                "MonetaryScore",
+                "RFM_Score",
+                "CustomerSegment",
+            ],
+        }
+
+        feature_list = list(self.customer_features.columns)
+        total_feature_count = len(feature_list) - 2  # exclude CustomerID & Churn
+
+        feature_info = {
+            "total_features": total_feature_count,
+            "feature_categories": {k: len(v) for k, v in feature_categories.items()},
+            "churn_rate": churn_rate,
+            "training_cutoff": str(self.training_cutoff.date()),
+            "observation_end": str(self.observation_end.date()),
+            "training_customers": total_customers,
+            "churned_customers": churned,
+            "active_customers": total_customers - churned,
+            "features": [
+                {
+                    "name": "Recency",
+                    "type": "numeric",
+                    "description": "Days since last purchase in training period",
+                    "min": float(self.customer_features["Recency"].min()),
+                    "max": float(self.customer_features["Recency"].max()),
+                    "mean": float(self.customer_features["Recency"].mean()),
+                }
+            ],
+        }
+
+        with open("data/processed/feature_info.json", "w") as f:
+            json.dump(feature_info, f, indent=4)
+
+        print("feature_info.json saved.")
+        print("Feature engineering summary:")
+        print(f"  Customers: {total_customers}")
+        print(f"  Features (excluding IDs/target): {total_feature_count}")
+        print(f"  Churn rate: {churn_rate * 100:.2f}%")
+        return self
+
+    def run_pipeline(self):
+        print("=" * 60)
+        print("STARTING FEATURE ENGINEERING PIPELINE")
+        print("=" * 60)
+
+        self.split_data_by_time()
+        self.create_target_variable()
+        self.create_rfm_features()
+        self.create_behavioral_features()
+        self.create_temporal_features()
+        self.create_product_features()
+        self.create_customer_value_segment()
+        self.handle_missing_values()
+        self.save_features()
+
+        print("Feature engineering completed successfully.")
+        return self.customer_features
+
+
+if __name__ == "__main__":
+    engineer = FeatureEngineer()
+    customer_features = engineer.run_pipeline()
